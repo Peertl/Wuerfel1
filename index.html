@@ -3,94 +3,113 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <title>Scanner: A4 + Würfel</title>
+    <title>Pro Kalibrierung: A4 + Würfel</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script async src="https://docs.opencv.org/4.8.0/opencv.js" onload="onOpenCvReady()"></script>
     <style>
-        body { margin:0; background:#050505; color:white; overflow:hidden; font-family: sans-serif; }
+        body { margin:0; background:#050505; color:white; overflow:hidden; font-family: 'Inter', sans-serif; }
         video, canvas { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
         .panel { 
             position:absolute; bottom:20px; left:20px; right:20px; 
-            background:rgba(20,20,20,0.9); padding:15px; border-radius:16px; 
+            background:rgba(20,20,20,0.95); padding:20px; border-radius:16px; 
             border: 1px solid rgba(255,255,255,0.1); z-index:10; max-width: 500px; margin: 0 auto;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
         }
-        .btn { 
-            width:100%; padding:12px; border-radius:10px; border:none; font-weight:bold; margin-top:10px;
-            background: linear-gradient(135deg, #FFD700, #ffb000); color:black;
+        button { 
+            width:100%; padding:14px; border-radius:10px; border:none; font-weight:bold; margin-top:10px; font-size:14px;
+            transition: all 0.2s;
         }
-        .btn:disabled { opacity:0.3; filter:grayscale(1); }
+        button:active { transform: scale(0.98); }
+        .btn-primary { background: #FFD700; color:black; }
+        .btn-secondary { background: #333; color: white; border: 1px solid #555; }
+        .btn-calc { background: #2563EB; color: white; }
+        
+        /* Grid Overlay */
+        .grid-overlay {
+            position: absolute; inset:0; pointer-events: none; opacity: 0.1;
+            background-image: linear-gradient(#fff 1px, transparent 1px), linear-gradient(90deg, #fff 1px, transparent 1px);
+            background-size: 50px 50px;
+        }
     </style>
 </head>
 <body>
 
 <video id="video" playsinline muted style="display:none"></video>
 <canvas id="canvas"></canvas>
+<div class="grid-overlay"></div>
 
 <div class="panel">
-    <div class="flex justify-between items-center text-sm mb-2">
-        <span class="font-bold text-yellow-400">Hybrid Kalibrierung</span>
-        <span id="status">Lade OpenCV...</span>
+    <div class="flex justify-between items-center mb-2">
+        <h2 class="font-bold text-lg">Scanner Kalibrierung</h2>
+        <div id="status-badge" class="bg-gray-800 text-xs px-2 py-1 rounded text-gray-300">Lade...</div>
+    </div>
+
+    <!-- Info Bereich -->
+    <div class="bg-gray-800 rounded p-2 text-xs mb-3 flex justify-between items-center">
+        <span>Fotos: <span id="count" class="text-yellow-400 font-bold text-sm">0</span> / 6</span>
+        <span id="rms-display" class="font-mono">RMS: --</span>
     </div>
     
-    <!-- Farb-Slider für Gelb-Feintuning (falls Licht schlecht ist) -->
-    <div class="space-y-2 mb-2 bg-gray-800 p-2 rounded text-xs">
-        <div class="flex justify-between">
-            <span>Würfel Farbe (Hue)</span>
+    <!-- Farb-Slider -->
+    <div class="mb-3">
+        <div class="flex justify-between text-[10px] text-gray-400 mb-1">
+            <span>Würfel Farbe (Hue) anpassen</span>
             <span id="hue-val">25</span>
         </div>
-        <input type="range" min="10" max="50" value="25" class="w-full h-1 bg-gray-600 rounded-lg appearance-none cursor-pointer" oninput="updateHue(this.value)">
+        <input type="range" min="0" max="60" value="25" class="w-full h-1 bg-gray-600 rounded-lg appearance-none cursor-pointer" oninput="updateHue(this.value)">
     </div>
 
-    <div class="flex justify-between text-xs text-gray-400 mb-2">
-        <span>Gespeicherte Posen: <span id="count" class="text-white">0</span>/6</span>
-        <span id="rms-display">--</span>
+    <!-- Buttons -->
+    <div id="controls">
+        <button id="btn-action" class="btn-primary" onclick="startCamera()" disabled>Kamera starten</button>
+        <button id="btn-calc" class="btn-calc hidden" onclick="runCalibration()">Jetzt Berechnen</button>
+        <button id="btn-reset" class="btn-secondary hidden mt-2" onclick="resetData()">Neustart</button>
     </div>
-
-    <button id="action-btn" class="btn" onclick="startCamera()" disabled>Kamera starten</button>
-    <button id="reset-btn" class="btn bg-gray-700 text-white mt-2" style="background:#333; color:white;" onclick="resetData()">Reset</button>
-
-    <div class="text-[10px] text-gray-500 mt-2 text-center leading-tight">
-        A4 Blatt + Gelber Würfel (44mm) in der Mitte.<br>
-        Grüner Rahmen = Blatt, Roter Punkt = Würfel.
+    
+    <div class="text-[10px] text-gray-500 mt-3 text-center">
+        1. DIN A4 Blatt auf Tisch<br>
+        2. Gelben Würfel (44mm) exakt in die Mitte
     </div>
 </div>
 
 <script>
-/** 
- * KONFIGURATION DER WELT
- */
-const A4_W = 210;
-const A4_H = 297;
-const CUBE_H = 44; 
+// --- KONFIGURATION ---
+const A4_W = 210; // mm
+const A4_H = 297; // mm
+const CUBE_H = 44; // mm
+const MIN_IMGS = 6;
 
-// Die 5 Referenzpunkte im 3D Raum (in mm)
-// Blatt liegt bei Z=0. Würfel ragt auf Z=44 hoch.
-const WORLD_POINTS = [
-    0, 0, 0,                // TL (Papier)
-    A4_W, 0, 0,             // TR (Papier)
-    A4_W, A4_H, 0,          // BR (Papier)
-    0, A4_H, 0,             // BL (Papier)
-    A4_W/2, A4_H/2, -CUBE_H // Würfel Mitte Oben (Minus Z, da OpenCV Z-Achse nach vorne zeigt)
+// Die 3D Welt-Koordinaten (werden später in OpenCV Mat gewandelt)
+// Reihenfolge: TL, TR, BR, BL (Papier), Center (Würfel Top)
+const WORLD_COORDS = [
+    0, 0, 0,                // TL
+    A4_W, 0, 0,             // TR
+    A4_W, A4_H, 0,          // BR
+    0, A4_H, 0,             // BL
+    A4_W/2, A4_H/2, -CUBE_H // Würfel Oben (Negative Z-Achse in OpenCV Konvention oft besser)
 ];
 
+// --- STATE ---
 let video, canvas, ctx;
 let streaming = false;
-let capturedSets = []; // Speichert Sets von 5 Punkten (4x Papier, 1x Würfel)
-let currentPoints = null; // Aktuell gefundene Punkte im Frame
+let capturedPoints = []; // JS Array mit den Punkt-Sets
+let currentFramePoints = null; // Aktuell erkannte Punkte
+let yellowHue = 25;
 
-// Gelb-Erkennung (HSV)
-let yellowHue = 25; // Standardmitte für Gelb
-let yellowRange = 15; // Toleranz
+function onOpenCvReady() {
+    updateStatus("Bereit", "green");
+    document.getElementById("btn-action").disabled = false;
+}
 
 function updateHue(val) {
     yellowHue = parseInt(val);
     document.getElementById("hue-val").innerText = val;
 }
 
-function onOpenCvReady() {
-    document.getElementById("status").innerText = "Bereit";
-    document.getElementById("status").className = "text-green-400";
-    document.getElementById("action-btn").disabled = false;
+function updateStatus(text, color="gray") {
+    const el = document.getElementById("status-badge");
+    el.innerText = text;
+    el.className = `text-xs px-2 py-1 rounded text-white bg-${color}-600`;
 }
 
 async function startCamera() {
@@ -109,35 +128,67 @@ async function startCamera() {
         canvas.height = video.videoHeight;
         
         streaming = true;
-        document.getElementById("action-btn").innerText = "Scan speichern";
-        document.getElementById("action-btn").onclick = capturePose;
         
-        requestAnimationFrame(processFrame);
+        // UI Umstellen
+        const btn = document.getElementById("btn-action");
+        btn.innerText = "Foto aufnehmen";
+        btn.onclick = captureFrame;
+        document.getElementById("btn-reset").classList.remove("hidden");
+        
+        requestAnimationFrame(processLoop);
+        
     } catch(e) {
-        alert("Kamera Fehler: " + e.message);
+        alert("Fehler: " + e.message);
     }
 }
 
-function processFrame() {
+function processLoop() {
     if(!streaming) return;
 
-    // 1. Setup
+    // 1. Bild holen
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     let src = cv.imread(canvas);
-    let dst = src.clone(); // Zum Zeichnen
     
-    // 2. Suche A4 Blatt (Weißes Rechteck)
+    // 2. Verarbeitung starten
+    try {
+        let result = findFeatures(src);
+        
+        if(result) {
+            currentFramePoints = result;
+            drawOverlay(result);
+            updateStatus("Erkannt", "green");
+            document.getElementById("btn-action").disabled = false;
+            document.getElementById("btn-action").style.opacity = "1";
+        } else {
+            currentFramePoints = null;
+            updateStatus("Suche...", "gray");
+            document.getElementById("btn-action").disabled = true;
+            document.getElementById("btn-action").style.opacity = "0.5";
+        }
+    } catch(e) {
+        console.error(e);
+    }
+    
+    src.delete();
+    requestAnimationFrame(processLoop);
+}
+
+// Kern-Logik: Findet Papier und Würfel
+function findFeatures(src) {
     let gray = new cv.Mat();
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-    cv.GaussianBlur(gray, gray, new cv.Size(5,5), 0);
-    cv.Canny(gray, gray, 50, 150);
+    
+    // A. Papier finden (Canny Edge)
+    let blurred = new cv.Mat();
+    cv.GaussianBlur(gray, blurred, new cv.Size(5,5), 0);
+    cv.Canny(blurred, blurred, 50, 150);
     
     let contours = new cv.MatVector();
     let hierarchy = new cv.Mat();
-    cv.findContours(gray, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+    cv.findContours(blurred, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
 
-    let paperQuad = null;
-    let maxArea = (canvas.width * canvas.height) * 0.10; // Mind 10% Bildfläche
+    let paperPoints = null;
+    let maxArea = (src.cols * src.rows) * 0.05; // Mindestens 5% des Bildes
 
     for(let i=0; i<contours.size(); i++) {
         let cnt = contours.get(i);
@@ -149,179 +200,220 @@ function processFrame() {
             
             if(approx.rows === 4 && cv.isContourConvex(approx)) {
                 maxArea = area;
-                if(paperQuad) paperQuad.delete();
-                paperQuad = approx.clone();
+                // Daten extrahieren
+                let pts = [];
+                for(let j=0; j<4; j++) {
+                    pts.push({ x: approx.data32S[j*2], y: approx.data32S[j*2+1] });
+                }
+                paperPoints = sortCorners(pts);
             }
             approx.delete();
         }
         cnt.delete();
     }
+    
+    // Cleanup A
+    gray.delete(); blurred.delete(); contours.delete(); hierarchy.delete();
 
-    // 3. Suche Gelben Würfel
+    if(!paperPoints) return null; // Kein Papier -> Abbruch
+
+    // B. Würfel finden (Farbe)
     let hsv = new cv.Mat();
-    cv.cvtColor(src, hsv, cv.COLOR_RGBA2RGB); // OpenCV js lädt oft als RGBA, Umwandlung nötig
+    cv.cvtColor(src, hsv, cv.COLOR_RGBA2RGB);
     cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
     
     let mask = new cv.Mat();
-    let low = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [yellowHue - yellowRange, 100, 100, 0]);
-    let high = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [yellowHue + yellowRange, 255, 255, 255]);
+    // HSV Range für Gelb (Toleranz +/- 15)
+    let low = new cv.Mat(src.rows, src.cols, src.type(), [Math.max(0, yellowHue-15), 100, 100, 0]);
+    let high = new cv.Mat(src.rows, src.cols, src.type(), [Math.min(180, yellowHue+15), 255, 255, 255]);
+    
     cv.inRange(hsv, low, high, mask);
     
-    // Morphologische Ops um Rauschen zu entfernen
+    // Rauschen entfernen
     let kernel = cv.Mat.ones(5, 5, cv.CV_8U);
     cv.morphologyEx(mask, mask, cv.MORPH_OPEN, kernel);
     
-    let cubeCenter = null;
     let contoursCube = new cv.MatVector();
-    cv.findContours(mask, contoursCube, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    let hierarchyCube = new cv.Mat();
+    cv.findContours(mask, contoursCube, hierarchyCube, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
     
-    // Nimm das größte gelbe Objekt
-    let maxYellowArea = 0;
+    let cubeCenter = null;
+    let maxYellow = 0;
+    
     for(let i=0; i<contoursCube.size(); i++) {
         let cnt = contoursCube.get(i);
         let area = cv.contourArea(cnt);
-        if(area > 500 && area > maxYellowArea) { // Mindestgröße
-            maxYellowArea = area;
-            let moments = cv.moments(cnt, false);
-            cubeCenter = {
-                x: moments.m10 / moments.m00,
-                y: moments.m01 / moments.m00
-            };
+        if(area > 200 && area > maxYellow) {
+            maxYellow = area;
+            let M = cv.moments(cnt, false);
+            if(M.m00 !== 0) {
+                cubeCenter = { x: M.m10 / M.m00, y: M.m01 / M.m00 };
+            }
         }
         cnt.delete();
     }
 
-    // 4. Validierung und Zeichnen
-    currentPoints = null;
-    
-    if(paperQuad && cubeCenter) {
-        // Papier Ecken sortieren
-        let pts = [];
-        for(let i=0; i<4; i++) pts.push({x: paperQuad.data32S[i*2], y: paperQuad.data32S[i*2+1]});
-        let sortedPaper = sortCorners(pts);
-        
-        // Prüfen ob Würfel innerhalb des Papiers liegt (einfacher Bounding Box Check)
-        // Hier vereinfacht: Wir nehmen an, wenn beides da ist, passt es.
-        
-        currentPoints = [...sortedPaper, cubeCenter];
-        
-        // Visualisierung
-        // Papier-Rahmen
-        ctx.beginPath();
-        ctx.lineWidth = 3;
-        ctx.strokeStyle = "#00FF00";
-        ctx.moveTo(sortedPaper[0].x, sortedPaper[0].y);
-        sortedPaper.forEach(p => ctx.lineTo(p.x, p.y));
-        ctx.closePath();
-        ctx.stroke();
-        
-        // Würfel-Punkt
-        ctx.beginPath();
-        ctx.fillStyle = "#FF0000";
-        ctx.arc(cubeCenter.x, cubeCenter.y, 10, 0, 2*Math.PI);
-        ctx.fill();
-        ctx.fillStyle = "white";
-        ctx.font = "12px monospace";
-        ctx.fillText("WÜRFEL (Z=44)", cubeCenter.x + 15, cubeCenter.y);
-        
-        document.getElementById("status").innerText = "Tracking stabil";
-        document.getElementById("status").className = "text-green-400";
-        document.getElementById("action-btn").disabled = false;
-        document.getElementById("action-btn").classList.remove("opacity-50");
-    } else {
-        document.getElementById("status").innerText = "Suche A4 + Würfel...";
-        document.getElementById("status").className = "text-yellow-500";
-        document.getElementById("action-btn").disabled = true;
-        document.getElementById("action-btn").classList.add("opacity-50");
+    // Cleanup B
+    hsv.delete(); mask.delete(); low.delete(); high.delete(); kernel.delete(); 
+    contoursCube.delete(); hierarchyCube.delete();
+
+    if(cubeCenter) {
+        // Rückgabe: Array mit 5 Punkten [TL, TR, BR, BL, CUBE]
+        return [...paperPoints, cubeCenter];
     }
-
-    // Cleanup
-    src.delete(); dst.delete(); gray.delete(); hsv.delete(); mask.delete(); 
-    contours.delete(); contoursCube.delete(); hierarchy.delete(); low.delete(); high.delete(); kernel.delete();
-    if(paperQuad) paperQuad.delete();
-
-    requestAnimationFrame(processFrame);
+    
+    return null;
 }
 
-function capturePose() {
-    if(!currentPoints) return;
+function drawOverlay(pts) {
+    // Papier Rahmen
+    ctx.beginPath();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = "#00FF00";
+    ctx.moveTo(pts[0].x, pts[0].y); // TL
+    ctx.lineTo(pts[1].x, pts[1].y); // TR
+    ctx.lineTo(pts[2].x, pts[2].y); // BR
+    ctx.lineTo(pts[3].x, pts[3].y); // BL
+    ctx.closePath();
+    ctx.stroke();
     
-    capturedSets.push(currentPoints);
-    document.getElementById("count").innerText = capturedSets.length;
+    // Würfel Punkt
+    let cube = pts[4];
+    ctx.beginPath();
+    ctx.fillStyle = "#FF0000";
+    ctx.arc(cube.x, cube.y, 8, 0, 2*Math.PI);
+    ctx.fill();
+}
+
+function captureFrame() {
+    if(!currentFramePoints) return;
     
-    // Visuelles Feedback
-    canvas.style.opacity = 0.5;
-    setTimeout(() => canvas.style.opacity = 1, 100);
+    // Wir speichern nur die Rohdaten (JS Objekte), keine OpenCV Mats!
+    // Das verhindert Speicherlecks.
+    capturedPoints.push(JSON.parse(JSON.stringify(currentFramePoints)));
     
-    if(capturedSets.length >= 6) {
-        calibrate();
+    let count = capturedPoints.length;
+    document.getElementById("count").innerText = count;
+    
+    // Flash Animation
+    const flash = document.createElement("div");
+    flash.className = "absolute inset-0 bg-white opacity-50 transition-opacity duration-200";
+    document.body.appendChild(flash);
+    setTimeout(() => flash.style.opacity = 0, 50);
+    setTimeout(() => flash.remove(), 250);
+
+    if(count >= MIN_IMGS) {
+        document.getElementById("btn-calc").classList.remove("hidden");
+        // Scroll nach unten, falls nötig
+        document.querySelector(".panel").scrollTop = 1000; 
     }
 }
 
-function calibrate() {
-    document.getElementById("action-btn").innerText = "Berechne...";
+function runCalibration() {
+    // 1. UI Feedback sofort geben
+    updateStatus("Rechne...", "blue");
+    document.getElementById("btn-calc").disabled = true;
+    document.getElementById("btn-calc").innerText = "Berechne...";
     
-    let objPoints = new cv.MatVector();
-    let imgPoints = new cv.MatVector();
-    
-    // 3D Referenzpunkte erstellen (für alle Frames gleich)
-    let obj = cv.matFromArray(5, 1, cv.CV_32FC3, WORLD_POINTS);
-    
-    // Gesammelte Daten konvertieren
-    capturedSets.forEach(points => {
-        let img = new cv.Mat(5, 1, cv.CV_32FC2);
-        for(let i=0; i<5; i++) {
-            img.data32F[i*2] = points[i].x;
-            img.data32F[i*2+1] = points[i].y;
-        }
-        
-        objPoints.push_back(obj);
-        imgPoints.push_back(img);
-    });
-    
-    let camMat = new cv.Mat.eye(3, 3, cv.CV_64F);
-    let distCoeffs = new cv.Mat.zeros(8, 1, cv.CV_64F);
-    let rvecs = new cv.MatVector();
-    let tvecs = new cv.MatVector();
-    
+    // 2. Berechnung verzögern, damit UI rendern kann (sonst Freeze ohne Textänderung)
+    setTimeout(() => {
+        performCalculation();
+    }, 100);
+}
+
+function performCalculation() {
+    // Speicherverwaltung ist hier kritisch!
+    let objPointsMatVector = new cv.MatVector();
+    let imgPointsMatVector = new cv.MatVector();
+    let matsToDelete = []; // Garbage Collection Helper
+
     try {
-        // Initial Guess flags sind wichtig bei wenigen Punkten
-        let flags = cv.CALIB_USE_INTRINSIC_GUESS;
-        // Grobe Schätzung: Fokus liegt in Bildmitte
-        camMat.data64F[0] = 1000; camMat.data64F[4] = 1000;
-        camMat.data64F[2] = canvas.width/2; camMat.data64F[5] = canvas.height/2;
+        // Für JEDES aufgenommene Bild müssen wir eine EIGENE 3D-Matrix erstellen
+        // Wenn man dieselbe Matrix mehrfach pusht, stürzt OpenCV.js ab.
+        capturedPoints.forEach(points => {
+            
+            // 3D Punkte Matrix (CV_32FC3)
+            let objMat = cv.matFromArray(5, 1, cv.CV_32FC3, WORLD_COORDS);
+            objPointsMatVector.push_back(objMat);
+            matsToDelete.push(objMat);
 
-        let rms = cv.calibrateCamera(objPoints, imgPoints, new cv.Size(canvas.width, canvas.height), camMat, distCoeffs, rvecs, tvecs, flags);
+            // 2D Bild Punkte Matrix (CV_32FC2)
+            // Daten flachklopfen [x1,y1, x2,y2, ...]
+            let flatPoints = [];
+            points.forEach(p => { flatPoints.push(p.x); flatPoints.push(p.y); });
+            
+            let imgMat = cv.matFromArray(5, 1, cv.CV_32FC2, flatPoints);
+            imgPointsMatVector.push_back(imgMat);
+            matsToDelete.push(imgMat);
+        });
+
+        // Output Matrizen
+        let cameraMatrix = new cv.Mat.eye(3, 3, cv.CV_64F);
+        let distCoeffs = new cv.Mat.zeros(8, 1, cv.CV_64F);
+        let rvecs = new cv.MatVector();
+        let tvecs = new cv.MatVector();
         
+        // Initial Guess (Hilft bei wenigen Punkten)
+        cameraMatrix.data64F[0] = 1000; // fx
+        cameraMatrix.data64F[4] = 1000; // fy
+        cameraMatrix.data64F[2] = canvas.width / 2; // cx
+        cameraMatrix.data64F[5] = canvas.height / 2; // cy
+
+        // --- DIE MAGIE ---
+        let rms = cv.calibrateCamera(
+            objPointsMatVector,
+            imgPointsMatVector,
+            new cv.Size(canvas.width, canvas.height),
+            cameraMatrix,
+            distCoeffs,
+            rvecs,
+            tvecs,
+            cv.CALIB_USE_INTRINSIC_GUESS
+        );
+
+        // Ergebnis anzeigen
         document.getElementById("rms-display").innerText = "RMS: " + rms.toFixed(2);
-        alert(`Kalibrierung erfolgreich!\nRMS Fehler: ${rms.toFixed(2)}\nDie 3D-Information des Würfels hat geholfen!`);
         
-        console.log("Camera Matrix:", camMat.data64F);
+        let msg = `Erfolg!\nRMS Fehler: ${rms.toFixed(3)}\n\nKameramatrix:\n[${cameraMatrix.data64F[0].toFixed(0)}, 0, ${cameraMatrix.data64F[2].toFixed(0)}]\n[0, ${cameraMatrix.data64F[4].toFixed(0)}, ${cameraMatrix.data64F[5].toFixed(0)}]\n[0, 0, 1]`;
+        alert(msg);
         
+        updateStatus("Fertig", "green");
+        
+        // Cleanup Outputs
+        cameraMatrix.delete(); distCoeffs.delete(); rvecs.delete(); tvecs.delete();
+
     } catch(e) {
-        alert("Fehler bei Berechnung: " + e);
+        alert("Rechenfehler: " + e);
+        console.error(e);
+        updateStatus("Fehler", "red");
+    } finally {
+        // Aufräumen aller temporären Matrizen
+        matsToDelete.forEach(m => m.delete());
+        objPointsMatVector.delete();
+        imgPointsMatVector.delete();
+        
+        document.getElementById("btn-calc").disabled = false;
+        document.getElementById("btn-calc").innerText = "Neu Berechnen";
     }
-    
-    // Reset UI
-    document.getElementById("action-btn").innerText = "Scan speichern";
-    obj.delete(); objPoints.delete(); imgPoints.delete();
-    camMat.delete(); distCoeffs.delete(); rvecs.delete(); tvecs.delete();
 }
 
 function resetData() {
-    capturedSets = [];
+    capturedPoints = [];
     document.getElementById("count").innerText = "0";
-    document.getElementById("rms-display").innerText = "--";
+    document.getElementById("btn-calc").classList.add("hidden");
+    document.getElementById("rms-display").innerText = "RMS: --";
+    updateStatus("Reset", "gray");
 }
 
-// Hilfsfunktion: Sortiere Ecken (TL, TR, BR, BL)
 function sortCorners(pts) {
+    // Sortiere nach Y
     pts.sort((a,b) => a.y - b.y);
+    // Top 2 nach X
     let top = pts.slice(0,2).sort((a,b) => a.x - b.x);
-    let bottom = pts.slice(2,4).sort((a,b) => b.x - a.x); // Hier trickreich: b-a damit wir BR zuerst haben? Nein.
-    // Standard OpenCV: TL, TR, BR, BL.
-    bottom.sort((a,b) => a.x - b.x); // Jetzt ist bottom[0] = BL, bottom[1] = BR
-    return [ top[0], top[1], bottom[1], bottom[0] ];
+    // Bottom 2 nach X
+    let bottom = pts.slice(2,4).sort((a,b) => a.x - b.x);
+    // Reihenfolge: TL, TR, BR, BL
+    return [top[0], top[1], bottom[1], bottom[0]];
 }
 </script>
 </body>
